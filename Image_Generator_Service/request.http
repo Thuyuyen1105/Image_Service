@@ -1,0 +1,48 @@
+### Generate image using Hugging Face API
+POST https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0
+Authorization: Bearer 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
+Content-Type: application/json
+
+{
+  "inputs": "a monkey hold banana"
+}
+
+
+### Generate image 
+POST http://localhost:3009/api/images/generate
+Content-Type: application/json
+
+{
+  "prompt": "Lush green banana trees thrive in a vibrant Vietnamese countryside, under a clear blue sky.",
+  "style": "anime",
+  "resolution": "1024x1024",
+  "scriptId": "6814b7134cb969301471ba41",
+  "splitScriptId": "6814bc7b5a2aa82b5f49439f",
+  "order":"0",
+}
+
+### Update edited image (upload file)
+PATCH http://localhost:3009/api/images/update/681749668632e14957c80d99
+Content-Type: multipart/form-data; boundary=MyBoundary
+
+--MyBoundary
+Content-Disposition: form-data; name="image"; filename="result.png"
+Content-Type: image/png
+
+< ./123.png
+--MyBoundary--
+
+
+### Regenerate image
+POST http://localhost:3009/api/images/regenerate/681749668632e14957c80d99
+
+
+
+### lấy ảnh dựa vào imageid 
+GET http://localhost:3009/api/images/view/image/681749668632e14957c80d99
+
+### lấy ảnh dựa vào scriptid
+GET http://localhost:3009/api/images/view/script/6814b7134cb969301471ba41
+
+### lấy ảnh dựa vào splitScriptId
+GET http://localhost:3009/api/images/view/split/6814bc7b5a2aa82b5f49439f
