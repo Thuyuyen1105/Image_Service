@@ -1,6 +1,7 @@
 const { HfInference } = require('@huggingface/inference');
 const cloudinary = require('cloudinary').v2;
 const Image = require('../models/Image');
+const Job = require('../models/Job');
 const dotenv = require('dotenv');
 const fs = require('fs');
 const path = require('path');
@@ -9,97 +10,254 @@ const mongoose = require('mongoose');
 
 dotenv.config();
 
+// Validate environment variables
+if (!process.env.HUGGINGFACE_API_KEY) {
+    throw new Error('HUGGINGFACE_API_KEY is required');
+}
+
+if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+    throw new Error('Cloudinary credentials are required');
+}
+
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
 const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
 
-const generateImage = async (prompt, style = 'realistic', resolution = '1024x1024', scriptId, splitScriptId, order) => {
-  if (!prompt || !scriptId || order === undefined) {
-    throw new Error('Prompt, scriptId, and order are required');
-  }
+// Retry configuration
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 2000; // 2 seconds
 
-  let image = null;
-  let tempFilePath = null;
+// Helper function to delay execution
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-  try {
-    // Lưu ảnh vào database với trạng thái "processing"
-    image = new Image({ prompt, style, resolution, scriptId, splitScriptId, order, status: 'processing', url: '' });
-    await image.save();
+// Helper function to handle retries
+async function withRetry(operation, maxRetries = MAX_RETRIES) {
+    let lastError;
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await operation();
+        } catch (error) {
+            lastError = error;
+            console.error(`Attempt ${i + 1} failed:`, error.message);
+            if (i < maxRetries - 1) {
+                await delay(RETRY_DELAY * (i + 1)); // Exponential backoff
+            }
+        }
+    }
+    throw lastError;
+}
 
-    // Tạo prompt nâng cao
-    const styleDescription = {
-      realistic: 'in a photorealistic style with high detail and natural lighting',
-      cartoon: 'in a vibrant cartoon style with bold colors and clean lines',
-      anime: 'in an anime art style with expressive features and dynamic composition',
-      watercolor: 'in a soft watercolor painting style with flowing colors and gentle brushstrokes',
-      'oil painting': 'in an oil painting style with rich textures and classical composition'
-    }[style.toLowerCase()] || `in a ${style} style`;
+const generateImage = async (params) => {
+    const {
+        jobId,
+        userId,
+        prompt,
+        style = 'anime',
+        resolution = '1024x1024',
+        scriptId,
+        splitScriptId,
+        order,
+        metadata
+    } = params;
 
-    const enhancedPrompt = `${prompt}, ${styleDescription}, high quality, detailed, professional`;
-
-    // Gọi API Hugging Face để tạo ảnh
-    const response = await hf.textToImage({
-      model: 'stabilityai/stable-diffusion-xl-base-1.0',
-      inputs: enhancedPrompt,
-      parameters: {
-        negative_prompt: 'low quality, blurry, distorted',
-        num_inference_steps: 50,
-        guidance_scale: 7.5
-      }
-    });
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    tempFilePath = path.join(os.tmpdir(), `image-${Date.now()}.png`);
-    fs.writeFileSync(tempFilePath, buffer);
-
-    // Upload ảnh lên Cloudinary
-    const uploadResult = await cloudinary.uploader.upload(tempFilePath, {
-      folder: 'video-generator',
-      resource_type: 'image',
-      transformation: [{ width: 1024, height: 1024, crop: 'fill' }]
-    });
-
-    // Cập nhật URL và trạng thái vào cơ sở dữ liệu
-    image.url = uploadResult.secure_url;
-    image.status = 'generated';
-    await image.save();
-
-    // Dọn dẹp file tạm
-    if (fs.existsSync(tempFilePath)) {
-      fs.unlinkSync(tempFilePath);
+    if (!prompt || !scriptId || !jobId || !userId) {
+        throw new Error('Prompt, scriptId, jobId, and userId are required');
     }
 
-    return {
-      status: 'success',
-      data: {
-        imageId: image._id,
-        url: image.url,
-        status: image.status,
-        prompt: image.prompt,
-        style: image.style,
-        resolution: image.resolution,
-        scriptId: image.scriptId,
-        splitScriptId: image.splitScriptId,
-        order: image.order,
-      }
-    };
-  } catch (error) {
-    if (image) {
-      image.status = 'failed';
-      image.error = error.message;
-      await image.save();
-    }
+    let image = null;
+    let tempFilePath = null;
+    let job = null;
 
-    if (tempFilePath && fs.existsSync(tempFilePath)) {
-      fs.unlinkSync(tempFilePath);
-    }
+    try {
+        // Get or create job
+        job = await Job.findOne({ jobId });
+        if (!job) {
+            // If this is the first image, create a new job
+            job = new Job({
+                jobId,
+                scriptId,
+                userId,
+                totalImages: metadata?.totalImages || 1,
+                status: 'processing'
+            });
+            await job.save();
+        }
 
-    throw new Error(`Failed to generate image: ${error.message}`);
-  }
+        // Create enhanced prompt with style
+        const styleDescription = {
+            realistic: 'in a photorealistic style with high detail and natural lighting',
+            cartoon: 'in a vibrant cartoon style with bold colors and clean lines',
+            anime: 'in an anime art style with expressive features and dynamic composition',
+            watercolor: 'in a soft watercolor painting style with flowing colors and gentle brushstrokes',
+            'oil painting': 'in an oil painting style with rich textures and classical composition'
+        }[style.toLowerCase()] || `in a ${style} style`;
+
+        const enhancedPrompt = `${prompt}, ${styleDescription}, high quality, detailed, professional`;
+
+        // Generate image using Stable Diffusion with retry logic
+        const response = await withRetry(async () => {
+            try {
+                return await hf.textToImage({
+                    model: 'stabilityai/stable-diffusion-xl-base-1.0',
+                    inputs: enhancedPrompt,
+                    parameters: {
+                        negative_prompt: 'low quality, blurry, distorted',
+                        num_inference_steps: 50,
+                        guidance_scale: 7.5,
+                        width: parseInt(resolution.split('x')[0]),
+                        height: parseInt(resolution.split('x')[1])
+                    }
+                });
+            } catch (error) {
+                console.error('HuggingFace API error:', error);
+                throw new Error(`HuggingFace API error: ${error.message}`);
+            }
+        });
+
+        // Process the response with timeout
+        const buffer = await Promise.race([
+            response.arrayBuffer(),
+            new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout while processing image data')), 30000)
+            )
+        ]);
+
+        tempFilePath = path.join(os.tmpdir(), `image-${Date.now()}.png`);
+        fs.writeFileSync(tempFilePath, Buffer.from(buffer));
+
+        // Upload to Cloudinary with retry logic
+        const uploadResult = await withRetry(async () => {
+            try {
+                return await cloudinary.uploader.upload(tempFilePath, {
+                    folder: 'video-generator',
+                    resource_type: 'image',
+                    transformation: [{ width: 1024, height: 1024, crop: 'fill' }]
+                });
+            } catch (error) {
+                console.error('Cloudinary upload error:', error);
+                throw new Error(`Cloudinary upload error: ${error.message}`);
+            }
+        });
+
+        // Only create database record after successful generation and upload
+        image = new Image({
+            jobId,
+            userId,
+            prompt,
+            style,
+            resolution,
+            scriptId,
+            splitScriptId,
+            order,
+            metadata,
+            status: 'generated',
+            url: uploadResult.secure_url,
+            createdAt: new Date(),
+            updatedAt: new Date()
+        });
+        await image.save();
+
+        // Update job progress
+        job.completedImages += 1;
+        if (job.completedImages >= job.totalImages) {
+            job.status = 'completed';
+        }
+        job.updatedAt = new Date();
+        await job.save();
+
+        // Clean up temp file
+        if (fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+        }
+
+        return {
+            status: 'success',
+            data: {
+                imageId: image._id,
+                jobId: image.jobId,
+                userId: image.userId,
+                url: image.url,
+                status: image.status,
+                prompt: image.prompt,
+                style: image.style,
+                resolution: image.resolution,
+                scriptId: image.scriptId,
+                splitScriptId: image.splitScriptId,
+                order: image.order,
+                metadata: image.metadata,
+                createdAt: image.createdAt,
+                updatedAt: image.updatedAt,
+                jobProgress: {
+                    completed: job.completedImages,
+                    total: job.totalImages,
+                    status: job.status
+                }
+            }
+        };
+    } catch (error) {
+        console.error('Error in generateImage:', error);
+        
+        // Update job status if it exists
+        if (job) {
+            job.status = 'failed';
+            job.updatedAt = new Date();
+            await job.save();
+        }
+
+        // Clean up temp file if exists
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+        }
+
+        // Create image record with default URL
+        const defaultImageUrl = 'https://res.cloudinary.com/dxpz4afdv/image/upload/v1746636099/video-generator/rwsbeeqlc3zbrq4jcl2s.jpg';
+        
+        image = new Image({
+            jobId,
+            userId,
+            prompt,
+            style,
+            resolution,
+            scriptId,
+            splitScriptId,
+            order,
+            metadata,
+            status: 'failed',
+            url: defaultImageUrl,
+            error: error.message,
+            createdAt: new Date(),
+            updatedAt: new Date()
+        });
+        await image.save();
+
+        return {
+            status: 'error',
+            error: error.message,
+            data: {
+                jobId,
+                userId,
+                prompt,
+                style,
+                resolution,
+                scriptId,
+                splitScriptId,
+                order,
+                metadata,
+                url: defaultImageUrl,
+                status: 'failed',
+                timestamp: new Date(),
+                jobProgress: job ? {
+                    completed: job.completedImages,
+                    total: job.totalImages,
+                    status: job.status
+                } : null
+            }
+        };
+    }
 };
 
 // Check image generation status
@@ -359,6 +517,52 @@ const getImagesBySplitScriptId = async (splitScriptId) => {
   }
 };
 
+// Add new function to check job status
+const checkJobStatus = async (jobId) => {
+    try {
+        const job = await Job.findOne({ jobId });
+        if (!job) {
+            throw new Error('Job not found');
+        }
+
+        // Get all images for this script, sorted by order
+        const images = await Image.find({ 
+          scriptId: job.scriptId 
+      }).sort({ order: 1 });
+
+        return {
+            status: 'success',
+            data: {
+                jobId: job.jobId,
+                scriptId: job.scriptId,
+                userId: job.userId,
+
+                totalImages: job.totalImages,
+                completedImages: job.completedImages,
+                status: job.status,
+                
+                images: images.map(img => ({
+                    imageId: img._id,
+                    url: img.url,
+                    status: img.status,
+                    order: img.order,
+                    prompt: img.prompt,
+                    style: img.style,
+                    resolution: img.resolution
+                })),
+                createdAt: job.createdAt,
+                updatedAt: job.updatedAt
+            }
+        };
+    } catch (error) {
+        console.error('Error in checkJobStatus:', error);
+        return {
+            status: 'error',
+            error: error.message
+        };
+    }
+};
+
 module.exports = {
   generateImage,
   checkImageStatus,
@@ -367,4 +571,5 @@ module.exports = {
   getImageById,
   getImagesByScriptId,
   getImagesBySplitScriptId,
+  checkJobStatus
 };

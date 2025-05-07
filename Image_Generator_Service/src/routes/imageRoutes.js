@@ -21,4 +21,7 @@ router.get('/view/script/:scriptId', imageController.viewImageByScriptId);
 //xem ảnh theo splitscriptid
 router.get('/view/split/:splitScriptId', imageController.viewImageBySplitScriptId);
 
+// Check job status
+router.get('/job/:jobId', imageController.checkJobStatus);
+
 module.exports = router; 

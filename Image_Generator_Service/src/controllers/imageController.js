@@ -2,16 +2,36 @@ const imageService = require('../services/imageService');
 
 const generateImage = async (req, res) => {
   try {
-    const { prompt, style = 'realistic', resolution = '1024x1024', scriptId, splitScriptId, order=0 } = req.body;
+    const { 
+      jobId,
+      userId,
+      prompt,
+      style = 'anime',
+      resolution = '1024x1024',
+      scriptId,
+      splitScriptId,
+      order,
+      metadata
+    } = req.body;
 
-    if (!prompt || !scriptId) {
+    if (!prompt || !scriptId || !jobId || !userId) {
       return res.status(400).json({
         status: 'error',
-        message: 'Prompt and scriptId are required'
+        message: 'Prompt, scriptId, jobId, and userId are required'
       });
     }
 
-    const result = await imageService.generateImage(prompt, style, resolution, scriptId, splitScriptId, order);
+    const result = await imageService.generateImage({
+      jobId,
+      userId,
+      prompt,
+      style,
+      resolution,
+      scriptId,
+      splitScriptId,
+      order,
+      metadata
+    });
 
     res.json(result);
   } catch (error) {
@@ -169,6 +189,21 @@ const viewImageBySplitScriptId = async (req, res) => {
   }
 };
 
+// Check job status
+const checkJobStatus = async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const result = await imageService.checkJobStatus(jobId);
+        res.json(result);
+    } catch (error) {
+        console.error('Error in checkJobStatus controller:', error);
+        res.status(500).json({
+            status: 'error',
+            error: error.message
+        });
+    }
+};
+
 module.exports = {
   generateImage,
   checkImageStatus,
@@ -177,4 +212,5 @@ module.exports = {
   viewImage,
   viewImageByScriptId,
   viewImageBySplitScriptId,
+  checkJobStatus
 };
