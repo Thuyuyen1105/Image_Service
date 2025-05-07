@@ -2,8 +2,10 @@ const { Worker } = require('worker_threads');
 const path = require('path');
 const os = require('os');
 
+const MAX_WORKERS = 10;
+
 class WorkerPool {
-    constructor(size = os.cpus().length) {
+    constructor(size = Math.min(os.cpus().length, MAX_WORKERS)) {
         this.size = size;
         this.workers = [];
         this.queue = [];
