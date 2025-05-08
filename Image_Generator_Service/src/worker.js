@@ -55,8 +55,13 @@ async function generateImage(jobData) {
             metadata
         });
 
-        // Cập nhật tiến độ job
-        job.completedImages += 1;
+        if (image.status === 'generated') {
+            await Job.updateOne({ jobId }, {
+                $inc: { completedImages: 1 },
+                $set: { updatedAt: new Date() }
+              });
+        }
+        
         if (job.completedImages >= job.totalImages) {
             job.status = 'completed';
         }
