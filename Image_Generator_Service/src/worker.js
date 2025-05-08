@@ -3,26 +3,24 @@ const path = require('path');
 const { connectDB } = require('./database');
 const imageService = require(path.join(__dirname, 'services', 'imageService'));
 const Job = require('./models/Job');
+const mongoose = require('mongoose');
 
 async function generateImage(jobData) {
     try {
-        // Connect to MongoDB
         await connectDB();
 
-        // Validate required fields
         const { 
             jobId,
             userId,
             prompt,
             scriptId,
             splitScriptId,
-            order,
             style = 'realistic',
             resolution = '1024x1024',
             metadata = {}
         } = jobData;
 
-        // Kiểm tra các trường bắt buộc
+        // Validate tất cả các trường cần thiết cho job
         if (!jobId || !userId || !prompt || !scriptId || !splitScriptId) {
             throw new Error('Missing required fields: jobId, userId, prompt, scriptId, splitScriptId');
         }
@@ -30,45 +28,93 @@ async function generateImage(jobData) {
         // Tìm hoặc tạo job mới
         let job = await Job.findOne({ jobId });
         if (!job) {
-            // Tạo job mới nếu chưa tồn tại
             job = new Job({
                 jobId,
                 scriptId,
                 userId,
-                totalImages: metadata.totalImages || 1,
+                totalImages: metadata.totalImage || 1,
                 completedImages: 0,
-                status: 'processing'
+                status: 'processing',
+                imageIds: []
             });
             await job.save();
         }
 
-        // Tạo ảnh
+        // Chỉ gửi các trường cần thiết cho imageService
         const result = await imageService.generateImage({
-            jobId,
-            userId,
             prompt,
             style,
             resolution,
             scriptId,
-            splitScriptId,
-            order,
-            metadata
+            splitScriptId
         });
 
-        if (image.status === 'generated') {
+        console.log('Image generation result:', {
+            jobId,
+            imageStatus: result.status,
+            imageId: result.data.imageId,
+            url: result.data.url
+        });
+
+        // Chỉ cộng completedImages khi tạo ảnh thành công
+        if (result.status === 'generated') {
+            console.log('Updating job completedImages:', {
+                jobId,
+                beforeCompleted: job.completedImages,
+                afterCompleted: job.completedImages + 1,
+                totalImages: job.totalImages
+            });
+
             await Job.updateOne({ jobId }, {
                 $inc: { completedImages: 1 },
+                $push: { imageIds: result.data.imageId },
                 $set: { updatedAt: new Date() }
-              });
+            });
+
+            // Kiểm tra và cập nhật status
+            const updatedJob = await Job.findOne({ jobId });
+            console.log('Job status check:', {
+                jobId,
+                completedImages: updatedJob.completedImages,
+                totalImages: updatedJob.totalImages,
+                currentStatus: updatedJob.status
+            });
+
+            if (updatedJob.completedImages >= updatedJob.totalImages) {
+                console.log('Updating job status to completed:', {
+                    jobId,
+                    completedImages: updatedJob.completedImages,
+                    totalImages: updatedJob.totalImages
+                });
+                await Job.updateOne(
+                    { jobId },
+                    { $set: { status: 'completed' } }
+                );
+                
+                // Emit socket event for job completion
+                parentPort.postMessage({
+                    type: 'jobCompleted',
+                    data: {
+                        jobId,
+                        userId,
+                        status: 'completed',
+                        completedImages: updatedJob.completedImages,
+                        totalImages: updatedJob.totalImages,
+                        images: updatedJob.imageIds
+                    }
+                });
+            }
+        } else {
+            console.log('Not updating completedImages - image not generated:', {
+                jobId,
+                imageStatus: result.status,
+                currentCompleted: job.completedImages
+            });
         }
-        
-        if (job.completedImages >= job.totalImages) {
-            job.status = 'completed';
-        }
-        await job.save();
 
         // Gửi kết quả về main thread
         parentPort.postMessage({
+            type: 'imageGenerated',
             success: true,
             data: {
                 ...result.data,
@@ -87,16 +133,29 @@ async function generateImage(jobData) {
         try {
             const job = await Job.findOne({ jobId: jobData.jobId });
             if (job) {
-                job.status = 'failed';
-                job.error = error.message;
-                await job.save();
+                // Chỉ set status failed nếu chưa có ảnh nào được tạo thành công
+                if (job.imageIds.length === 0) {
+                    job.status = 'failed';
+                    job.error = error.message;
+                    await job.save();
+                    
+                    // Emit socket event for job failure
+                    parentPort.postMessage({
+                        type: 'jobFailed',
+                        data: {
+                            jobId: jobData.jobId,
+                            userId: jobData.userId,
+                            error: error.message
+                        }
+                    });
+                }
             }
         } catch (dbError) {
             console.error('Error updating job status:', dbError);
         }
 
-        // Gửi thông báo lỗi với URL mặc định
         parentPort.postMessage({
+            type: 'error',
             success: false,
             error: error.message,
             jobId: jobData.jobId,

@@ -53,41 +53,23 @@ async function withRetry(operation, maxRetries = MAX_RETRIES) {
 
 const generateImage = async (params) => {
     const {
-        jobId,
-        userId,
         prompt,
         style = 'anime',
         resolution = '1024x1024',
         scriptId,
-        splitScriptId,
-        order,
-        metadata
+        splitScriptId
     } = params;
 
-    if (!prompt || !scriptId || !jobId || !userId) {
-        throw new Error('Prompt, scriptId, jobId, and userId are required');
+    // Chỉ validate các trường cần thiết
+    if (!prompt || !scriptId || !splitScriptId) {
+        throw new Error('Prompt, scriptId, and splitScriptId are required');
     }
 
     let image = null;
     let tempFilePath = null;
-    let job = null;
 
     try {
-        // Get or create job
-        job = await Job.findOne({ jobId });
-        if (!job) {
-            // If this is the first image, create a new job
-            job = new Job({
-                jobId,
-                scriptId,
-                userId,
-                totalImages: metadata?.totalImages || 1,
-                status: 'processing'
-            });
-            await job.save();
-        }
-
-        // Create enhanced prompt with style
+        // Tạo enhanced prompt với style
         const styleDescription = {
             realistic: 'in a photorealistic style with high detail and natural lighting',
             cartoon: 'in a vibrant cartoon style with bold colors and clean lines',
@@ -143,31 +125,19 @@ const generateImage = async (params) => {
             }
         });
 
-        // Only create database record after successful generation and upload
+        // Tạo image record với đúng schema
         image = new Image({
-            jobId,
-            userId,
-            prompt,
-            style,
-            resolution,
-            scriptId,
-            splitScriptId,
-            order,
-            metadata,
-            status: 'generated',
+            splitScriptId,    // required
+            scriptId,         // required
+            prompt,           // required
+            style,            // enum: ['realistic', 'cartoon', 'anime', 'watercolor', 'oil painting']
+            resolution,       // default: '1024x1024'
             url: uploadResult.secure_url,
+            status: 'generated',
             createdAt: new Date(),
             updatedAt: new Date()
         });
         await image.save();
-
-        // Update job progress
-        job.completedImages += 1;
-        if (job.completedImages >= job.totalImages) {
-            job.status = 'completed';
-        }
-        job.updatedAt = new Date();
-        await job.save();
 
         // Clean up temp file
         if (fs.existsSync(tempFilePath)) {
@@ -175,11 +145,9 @@ const generateImage = async (params) => {
         }
 
         return {
-            status: 'success',
+            status: 'generated',
             data: {
                 imageId: image._id,
-                jobId: image.jobId,
-                userId: image.userId,
                 url: image.url,
                 status: image.status,
                 prompt: image.prompt,
@@ -187,47 +155,29 @@ const generateImage = async (params) => {
                 resolution: image.resolution,
                 scriptId: image.scriptId,
                 splitScriptId: image.splitScriptId,
-                order: image.order,
-                metadata: image.metadata,
                 createdAt: image.createdAt,
-                updatedAt: image.updatedAt,
-                jobProgress: {
-                    completed: job.completedImages,
-                    total: job.totalImages,
-                    status: job.status
-                }
+                updatedAt: image.updatedAt
             }
         };
     } catch (error) {
         console.error('Error in generateImage:', error);
         
-        // Update job status if it exists
-        if (job) {
-            job.status = 'failed';
-            job.updatedAt = new Date();
-            await job.save();
-        }
-
         // Clean up temp file if exists
         if (tempFilePath && fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
         }
 
-        // Create image record with default URL
+        // Tạo image record với default URL và đúng schema
         const defaultImageUrl = 'https://res.cloudinary.com/dxpz4afdv/image/upload/v1746636099/video-generator/rwsbeeqlc3zbrq4jcl2s.jpg';
         
         image = new Image({
-            jobId,
-            userId,
-            prompt,
-            style,
-            resolution,
-            scriptId,
-            splitScriptId,
-            order,
-            metadata,
-            status: 'failed',
+            splitScriptId,    // required
+            scriptId,         // required
+            prompt,           // required
+            style,            // enum: ['realistic', 'cartoon', 'anime', 'watercolor', 'oil painting']
+            resolution,       // default: '1024x1024'
             url: defaultImageUrl,
+            status: 'generated',
             error: error.message,
             createdAt: new Date(),
             updatedAt: new Date()
@@ -235,26 +185,20 @@ const generateImage = async (params) => {
         await image.save();
 
         return {
-            status: 'error',
+            status: 'generated',
             error: error.message,
             data: {
-                jobId,
-                userId,
-                prompt,
-                style,
-                resolution,
-                scriptId,
-                splitScriptId,
-                order,
-                metadata,
-                url: defaultImageUrl,
-                status: 'failed',
-                timestamp: new Date(),
-                jobProgress: job ? {
-                    completed: job.completedImages,
-                    total: job.totalImages,
-                    status: job.status
-                } : null
+                imageId: image._id,
+                url: image.url,
+                status: image.status,
+                prompt: image.prompt,
+                style: image.style,
+                resolution: image.resolution,
+                scriptId: image.scriptId,
+                splitScriptId: image.splitScriptId,
+                error: image.error,
+                createdAt: image.createdAt,
+                updatedAt: image.updatedAt
             }
         };
     }
@@ -525,10 +469,10 @@ const checkJobStatus = async (jobId) => {
             throw new Error('Job not found');
         }
 
-        // Get all images for this script, sorted by order
+        // Get all images for this script
         const images = await Image.find({ 
-          scriptId: job.scriptId 
-      }).sort({ order: 1 });
+            scriptId: job.scriptId 
+        });
 
         return {
             status: 'success',
@@ -536,16 +480,13 @@ const checkJobStatus = async (jobId) => {
                 jobId: job.jobId,
                 scriptId: job.scriptId,
                 userId: job.userId,
-
                 totalImages: job.totalImages,
                 completedImages: job.completedImages,
                 status: job.status,
-                
                 images: images.map(img => ({
                     imageId: img._id,
                     url: img.url,
                     status: img.status,
-                    order: img.order,
                     prompt: img.prompt,
                     style: img.style,
                     resolution: img.resolution
