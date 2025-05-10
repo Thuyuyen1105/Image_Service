@@ -11,6 +11,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@google/genai": "^0.13.0",
+    "@google/generative-ai": "^0.24.1",
     "@huggingface/inference": "^3.8.1",
     "amqplib": "^0.10.8",
     "axios": "^1.8.4",

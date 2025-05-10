@@ -1,4 +1,4 @@
-const { HfInference } = require('@huggingface/inference');
+const { GoogleGenAI,Modality } = require('@google/genai');
 const cloudinary = require('cloudinary').v2;
 const Image = require('../models/Image');
 const Job = require('../models/Job');
@@ -11,8 +11,8 @@ const mongoose = require('mongoose');
 dotenv.config();
 
 // Validate environment variables
-if (!process.env.HUGGINGFACE_API_KEY) {
-    throw new Error('HUGGINGFACE_API_KEY is required');
+if (!process.env.GOOGLE_API_KEY) {
+    throw new Error('GOOGLE_API_KEY is required');
 }
 
 if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
@@ -25,7 +25,8 @@ cloudinary.config({
     api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
+// Initialize Gemini
+const genAI = new GoogleGenAI(process.env.GOOGLE_API_KEY);
 
 // Retry configuration
 const MAX_RETRIES = 3;
@@ -40,7 +41,7 @@ async function withRetry(operation, maxRetries = MAX_RETRIES) {
     for (let i = 0; i < maxRetries; i++) {
         try {
             return await operation();
-        } catch (error) {
+        } catch (error) { 
             lastError = error;
             console.error(`Attempt ${i + 1} failed:`, error.message);
             if (i < maxRetries - 1) {
@@ -52,15 +53,8 @@ async function withRetry(operation, maxRetries = MAX_RETRIES) {
 }
 
 const generateImage = async (params) => {
-    const {
-        prompt,
-        style = 'anime',
-        resolution = '1024x1024',
-        scriptId,
-        splitScriptId
-    } = params;
+    const { prompt, style = 'anime', resolution = '1024x1024', scriptId, splitScriptId } = params;
 
-    // Chỉ validate các trường cần thiết
     if (!prompt || !scriptId || !splitScriptId) {
         throw new Error('Prompt, scriptId, and splitScriptId are required');
     }
@@ -69,7 +63,8 @@ const generateImage = async (params) => {
     let tempFilePath = null;
 
     try {
-        // Tạo enhanced prompt với style
+        const [width, height] = resolution.split('x').map(Number);
+
         const styleDescription = {
             realistic: 'in a photorealistic style with high detail and natural lighting',
             cartoon: 'in a vibrant cartoon style with bold colors and clean lines',
@@ -78,60 +73,55 @@ const generateImage = async (params) => {
             'oil painting': 'in an oil painting style with rich textures and classical composition'
         }[style.toLowerCase()] || `in a ${style} style`;
 
-        const enhancedPrompt = `${prompt}, ${styleDescription}, high quality, detailed, professional`;
+        const sizeDescription = `with dimensions ${width}x${height} pixels, maintain aspect ratio`;
+        const enhancedPrompt = `Generate an image: ${prompt}, ${styleDescription}, ${sizeDescription}, high quality, detailed, no text in the image.`;
 
-        // Generate image using Stable Diffusion with retry logic
-        const response = await withRetry(async () => {
-            try {
-                return await hf.textToImage({
-                    model: 'stabilityai/stable-diffusion-xl-base-1.0',
-                    inputs: enhancedPrompt,
-                    parameters: {
-                        negative_prompt: 'low quality, blurry, distorted',
-                        num_inference_steps: 50,
-                        guidance_scale: 7.5,
-                        width: parseInt(resolution.split('x')[0]),
-                        height: parseInt(resolution.split('x')[1])
-                    }
-                });
-            } catch (error) {
-                console.error('HuggingFace API error:', error);
-                throw new Error(`HuggingFace API error: ${error.message}`);
+
+        // Use retry logic for generating the image
+        const buffer = await withRetry(async () => {
+            const response = await genAI.models.generateContent({
+                model: "gemini-2.0-flash-preview-image-generation",
+                contents: enhancedPrompt,
+                config: {
+                    responseModalities: [Modality.TEXT, Modality.IMAGE]
+                }
+            });
+            // Extract image data
+
+            for (const part of response.candidates[0].content.parts) {
+                if (part.inlineData) {
+                    const imageData = part.inlineData.data;
+                    return Buffer.from(imageData, 'base64'); // Return image buffer
+                }
             }
+
+            throw new Error('No image data returned from Gemini');
         });
 
-        // Process the response with timeout
-        const buffer = await Promise.race([
-            response.arrayBuffer(),
-            new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Timeout while processing image data')), 30000)
-            )
-        ]);
-
+        // Save the image buffer to a temporary file
         tempFilePath = path.join(os.tmpdir(), `image-${Date.now()}.png`);
-        fs.writeFileSync(tempFilePath, Buffer.from(buffer));
+        fs.writeFileSync(tempFilePath, buffer);
 
-        // Upload to Cloudinary with retry logic
-        const uploadResult = await withRetry(async () => {
-            try {
-                return await cloudinary.uploader.upload(tempFilePath, {
-                    folder: 'video-generator',
-                    resource_type: 'image',
-                    transformation: [{ width: 1024, height: 1024, crop: 'fill' }]
-                });
-            } catch (error) {
-                console.error('Cloudinary upload error:', error);
-                throw new Error(`Cloudinary upload error: ${error.message}`);
-            }
-        });
+        // Upload the image to Cloudinary
+        const uploadResult = await withRetry(() =>
+            cloudinary.uploader.upload(tempFilePath, {
+                folder: 'video-generator',
+                resource_type: 'image',
+                transformation: [{
+                    width,
+                    height,
+                    crop: 'fill'
+                }]
+            })
+        );
 
-        // Tạo image record với đúng schema
+        // Save the image data to the database
         image = new Image({
-            splitScriptId,    // required
-            scriptId,         // required
-            prompt,           // required
-            style,            // enum: ['realistic', 'cartoon', 'anime', 'watercolor', 'oil painting']
-            resolution,       // default: '1024x1024'
+            splitScriptId,
+            scriptId,
+            prompt,
+            style,
+            resolution,
             url: uploadResult.secure_url,
             status: 'generated',
             createdAt: new Date(),
@@ -139,7 +129,7 @@ const generateImage = async (params) => {
         });
         await image.save();
 
-        // Clean up temp file
+        // Clean up the temporary file
         if (fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
         }
@@ -161,22 +151,23 @@ const generateImage = async (params) => {
         };
     } catch (error) {
         console.error('Error in generateImage:', error);
-        
-        // Clean up temp file if exists
+
+        // Clean up any temporary files in case of error
         if (tempFilePath && fs.existsSync(tempFilePath)) {
             fs.unlinkSync(tempFilePath);
         }
 
-        // Tạo image record với default URL và đúng schema
-        const defaultImageUrl = 'https://res.cloudinary.com/dxpz4afdv/image/upload/v1746636099/video-generator/rwsbeeqlc3zbrq4jcl2s.jpg';
-        
+        // Fallback URL in case of failure
+        const fallbackUrl = 'https://res.cloudinary.com/dxpz4afdv/image/upload/v1746636099/video-generator/rwsbeeqlc3zbrq4jcl2s.jpg';
+
+        // Save the image data to the database with the fallback URL
         image = new Image({
-            splitScriptId,    // required
-            scriptId,         // required
-            prompt,           // required
-            style,            // enum: ['realistic', 'cartoon', 'anime', 'watercolor', 'oil painting']
-            resolution,       // default: '1024x1024'
-            url: defaultImageUrl,
+            splitScriptId,
+            scriptId,
+            prompt,
+            style,
+            resolution,
+            url: fallbackUrl,
             status: 'generated',
             error: error.message,
             createdAt: new Date(),
@@ -203,6 +194,8 @@ const generateImage = async (params) => {
         };
     }
 };
+
+
 
 // Check image generation status
 const checkImageStatus = async (imageId) => {
@@ -293,20 +286,17 @@ const regenerateImage = async (imageId) => {
 
     console.log('Generated seed:', seed);
 
-    const response = await hf.textToImage({
-      model: 'stabilityai/stable-diffusion-xl-base-1.0',
-      inputs: enhancedPrompt,
-      parameters: {
-        negative_prompt: 'low quality, blurry, distorted',
-        num_inference_steps: 50,
-        guidance_scale: 7.5,
-        seed: seed,
-      }
+    const response = await model.generateContent({
+      contents: [{
+        parts: [{
+          text: enhancedPrompt
+        }]
+      }]
     });
 
-    console.log('Received response from Hugging Face API');
+    console.log('Received response from Gemini API');
 
-    const buffer = Buffer.from(await response.arrayBuffer());
+    const buffer = Buffer.from(await response.response.image());
     tempFilePath = path.join(os.tmpdir(), `image-${Date.now()}.png`);
     fs.writeFileSync(tempFilePath, buffer);
 
@@ -466,7 +456,16 @@ const checkJobStatus = async (jobId) => {
     try {
         const job = await Job.findOne({ jobId });
         if (!job) {
-            throw new Error('Job not found');
+          return {
+            status: 'success',
+            data: {
+              jobId: job.jobId,
+              scriptId: job.scriptId,
+              userId: job.userId,
+              totalImages: job.totalImages,
+              completedImages: job.completedImages,
+            }
+          };
         }
 
         // Get all images for this script
@@ -489,7 +488,8 @@ const checkJobStatus = async (jobId) => {
                     status: img.status,
                     prompt: img.prompt,
                     style: img.style,
-                    resolution: img.resolution
+                    resolution: img.resolution,
+                    splitScriptId: img.splitScriptId
                 })),
                 createdAt: job.createdAt,
                 updatedAt: job.updatedAt

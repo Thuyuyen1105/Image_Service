@@ -220,7 +220,7 @@ const checkJobStatus = async (req, res) => {
     } catch (error) {
         console.error('Error in checkJobStatus controller:', error);
         res.status(500).json({
-            status: 'error',
+            status: 'success',
             error: error.message
         });
     }
