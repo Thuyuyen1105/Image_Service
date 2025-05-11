@@ -17,7 +17,7 @@ const imageSchema = new Schema({
   },
   style: {
     type: String,
-    enum: ['realistic', 'cartoon', 'anime', 'watercolor', 'oil painting'], // mở rộng nếu cần
+    enum: ['realistic', 'cartoon', 'anime', 'watercolor', 'oil painting', 'pixel', 'sketch'], // mở rộng nếu cần
     default: 'realistic'
   },
   resolution: {
