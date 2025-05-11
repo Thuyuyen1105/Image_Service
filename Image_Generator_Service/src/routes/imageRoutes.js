@@ -24,4 +24,7 @@ router.get('/view/split/:splitScriptId', imageController.viewImageBySplitScriptI
 // Check job status
 router.get('/job/:jobId', imageController.checkJobStatus);
 
+// Update route to handle base64 image
+router.put('/update/:imageId', imageController.updateEditedImage);
+
 module.exports = router; 

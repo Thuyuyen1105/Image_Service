@@ -1,6 +1,9 @@
 const imageService = require('../services/imageService');
 const Job = require('../models/Job');
 const WorkerPool = require('../workerPool');
+const path = require('path');
+const os = require('os');
+const fs = require('fs');
 
 // Initialize worker pool
 const workerPool = new WorkerPool();
@@ -86,19 +89,55 @@ const checkImageStatus = async (req, res) => {
 const updateEditedImage = async (req, res) => {
     try {
         const { imageId } = req.params;
-        const imageFile = req.file;
-        console.log('Uploaded file info:', req.file);
+        const { imageBase64 } = req.body;
 
         if (!imageId) {
-            return res.status(400).json({ status: 'error', message: 'Image ID is required' });
+            return res.status(400).json({ 
+                status: 'error', 
+                message: 'Image ID is required' 
+            });
         }
 
-        if (!imageFile) {
-            return res.status(400).json({ status: 'error', message: 'No image file uploaded' });
+        if (!imageBase64) {
+            return res.status(400).json({ 
+                status: 'error', 
+                message: 'No image data provided' 
+            });
         }
 
-        const result = await imageService.updateEditedImage(imageId, imageFile.path);
-        res.json(result);
+        // Validate base64 format
+        if (!imageBase64.startsWith('data:image/')) {
+            return res.status(400).json({ 
+                status: 'error', 
+                message: 'Invalid image format. Must be a base64 data URL' 
+            });
+        }
+
+        // Extract the base64 data
+        const base64Data = imageBase64.split(',')[1];
+        if (!base64Data) {
+            return res.status(400).json({ 
+                status: 'error', 
+                message: 'Invalid base64 data format' 
+            });
+        }
+
+        // Convert base64 to buffer
+        const imageBuffer = Buffer.from(base64Data, 'base64');
+
+        // Create temporary file
+        const tempFilePath = path.join(os.tmpdir(), `edited-image-${Date.now()}.png`);
+        fs.writeFileSync(tempFilePath, imageBuffer);
+
+        try {
+            const result = await imageService.updateEditedImage(imageId, tempFilePath);
+            res.json(result);
+        } finally {
+            // Clean up temp file
+            if (fs.existsSync(tempFilePath)) {
+                fs.unlinkSync(tempFilePath);
+            }
+        }
     } catch (error) {
         console.error('Error in updateEditedImage controller:', error);
         res.status(500).json({
@@ -220,7 +259,7 @@ const checkJobStatus = async (req, res) => {
     } catch (error) {
         console.error('Error in checkJobStatus controller:', error);
         res.status(500).json({
-            status: 'success',
+            status: 'failed',
             error: error.message
         });
     }

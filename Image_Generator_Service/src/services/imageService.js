@@ -221,46 +221,41 @@ const checkImageStatus = async (imageId) => {
 
 // Update manually edited image
 const updateEditedImage = async (imageId, localFilePath) => {
-  const image = await Image.findById(imageId);
-  if (!image) {
-    throw new Error('Image not found');
-  }
+    try {
+        const image = await Image.findById(imageId);
+        if (!image) {
+            throw new Error('Image not found');
+        }
 
-  if (!image.url) {
-    throw new Error('Original image does not have a Cloudinary URL');
-  }
+        // Upload the edited image to Cloudinary
+        const uploadResult = await cloudinary.uploader.upload(localFilePath, {
+            folder: 'video-generator',
+            resource_type: 'image'
+        });
 
-  const publicId = image.url
-    .split('/')
-    .slice(-2)
-    .join('/')
-    .split('.')[0];
+        // Update the image record with new URL
+        image.url = uploadResult.secure_url;
+        image.updatedAt = new Date();
+        await image.save();
 
-  const uploadResult = await cloudinary.uploader.upload(localFilePath, {
-    public_id: publicId,
-    overwrite: true,
-    transformation: [{ width: 1024, height: 1024, crop: 'fill' }]
-  });
-
-  image.updatedAt = new Date();
-  await image.save();
-
-  if (fs.existsSync(localFilePath)) {
-    fs.unlinkSync(localFilePath);
-  }
-
-  return {
-    status: 'success',
-    data: {
-      imageId: image._id,
-      url: uploadResult.secure_url,
-      status: image.status,
-      prompt: image.prompt,
-      style: image.style,
-      resolution: image.resolution,
-      scriptId: image.scriptId,
+        return {
+            status: 'success',
+            data: {
+                imageId: image._id,
+                url: image.url,
+                status: image.status,
+                prompt: image.prompt,
+                style: image.style,
+                resolution: image.resolution,
+                scriptId: image.scriptId,
+                splitScriptId: image.splitScriptId,
+                updatedAt: image.updatedAt
+            }
+        };
+    } catch (error) {
+        console.error('Error in updateEditedImage:', error);
+        throw new Error(`Failed to update edited image: ${error.message}`);
     }
-  };
 };
 
 const regenerateImage = async (imageId) => {
@@ -459,11 +454,7 @@ const checkJobStatus = async (jobId) => {
           return {
             status: 'success',
             data: {
-              jobId: job.jobId,
-              scriptId: job.scriptId,
-              userId: job.userId,
-              totalImages: job.totalImages,
-              completedImages: job.completedImages,
+              status: 'waiting for queue to create job',
             }
           };
         }
@@ -504,6 +495,37 @@ const checkJobStatus = async (jobId) => {
     }
 };
 
+const saveEditedImage = async (imageId, dataUrl) => {
+    try {
+        // Call API to update edited image
+        const response = await fetch(`/api/images/update/${imageId}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                imageBase64: dataUrl
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to save edited image');
+        }
+
+        const result = await response.json();
+        
+        if (result.status === 'success') {
+            console.log('Image updated successfully:', result.data);
+            return result.data;
+        } else {
+            throw new Error(result.message || 'Failed to update image');
+        }
+    } catch (error) {
+        console.error('Error saving edited image:', error);
+        throw error;
+    }
+};
+
 module.exports = {
   generateImage,
   checkImageStatus,
@@ -512,5 +534,6 @@ module.exports = {
   getImageById,
   getImagesByScriptId,
   getImagesBySplitScriptId,
-  checkJobStatus
+  checkJobStatus,
+  saveEditedImage
 };
