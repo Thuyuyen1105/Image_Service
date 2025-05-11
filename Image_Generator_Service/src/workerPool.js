@@ -45,7 +45,10 @@ class WorkerPool {
             // Validate required fields
             const { jobId, userId, prompt, scriptId, splitScriptId } = jobData;
             if (!jobId || !userId || !prompt || !scriptId || !splitScriptId) {
-                throw new Error('Missing required fields: jobId, userId, prompt, scriptId, splitScriptId');
+                return {
+                    success: false,
+                    error: 'Missing required fields: jobId, userId, prompt, scriptId, splitScriptId'
+                };
             }
 
             // Check if job already exists
@@ -76,7 +79,7 @@ class WorkerPool {
             // If job is already completed or failed, don't process
             if (job.status === 'completed' || job.status === 'failed') {
                 return {
-                    status: job.status,
+                    success: true,
                     data: {
                         jobId: job.jobId,
                         status: job.status,
@@ -100,13 +103,35 @@ class WorkerPool {
                 
                 worker.once('message', (result) => {
                     this.activeWorkers.delete(worker);
-                    resolve(result);
+                    if (result.type === 'error') {
+                        resolve({
+                            success: false,
+                            error: result.error,
+                            data: {
+                                jobId: result.jobId,
+                                userId: result.userId,
+                                defaultImageUrl: result.defaultImageUrl
+                            }
+                        });
+                    } else {
+                        resolve({
+                            success: true,
+                            data: result.data
+                        });
+                    }
                     this.processNextJob();
                 });
 
                 worker.once('error', (error) => {
                     this.activeWorkers.delete(worker);
-                    reject(error);
+                    resolve({
+                        success: false,
+                        error: error.message,
+                        data: {
+                            jobId: jobData.jobId,
+                            userId: jobData.userId
+                        }
+                    });
                     this.processNextJob();
                 });
 
@@ -114,7 +139,14 @@ class WorkerPool {
             });
         } catch (error) {
             console.error('Error in processJob:', error);
-            throw error;
+            return {
+                success: false,
+                error: error.message,
+                data: {
+                    jobId: jobData.jobId,
+                    userId: jobData.userId
+                }
+            };
         }
     }
 
