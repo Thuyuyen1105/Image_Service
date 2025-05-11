@@ -66,12 +66,16 @@ const generateImage = async (params) => {
         const [width, height] = resolution.split('x').map(Number);
 
         const styleDescription = {
-            realistic: 'in a photorealistic style with high detail and natural lighting',
-            cartoon: 'in a vibrant cartoon style with bold colors and clean lines',
-            anime: 'in an anime art style with expressive features and dynamic composition',
-            watercolor: 'in a soft watercolor painting style with flowing colors and gentle brushstrokes',
-            'oil painting': 'in an oil painting style with rich textures and classical composition'
-        }[style.toLowerCase()] || `in a ${style} style`;
+          realistic: 'in a photorealistic style with high detail and natural lighting, where every element appears lifelike',
+          cartoon: 'in a vibrant cartoon style with bold colors and clean lines, capturing a playful and exaggerated look',
+          anime: 'in an anime art style with expressive features and dynamic composition, often with sharp contrasts and exaggerated expressions',
+          watercolor: 'in a soft watercolor painting style with flowing colors and gentle brushstrokes, often creating a dreamy and fluid effect',
+          'oil painting': 'in an oil painting style with rich textures and classical composition, emphasizing depth and a traditional aesthetic',
+          pixel: 'in a pixel art style, using small, square-shaped elements to create a retro, low-resolution image with a nostalgic feel',
+          sketch: 'in a sketching style with rough lines and shading, resembling hand-drawn pencil or charcoal artwork',
+
+      }[style.toLowerCase()] || `in a ${style} style`;
+      
 
         const sizeDescription = `with dimensions ${width}x${height} pixels, maintain aspect ratio`;
         const enhancedPrompt = `Generate an image: ${prompt}, ${styleDescription}, ${sizeDescription}, high quality, detailed, no text in the image.`;
@@ -495,37 +499,6 @@ const checkJobStatus = async (jobId) => {
     }
 };
 
-const saveEditedImage = async (imageId, dataUrl) => {
-    try {
-        // Call API to update edited image
-        const response = await fetch(`/api/images/update/${imageId}`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                imageBase64: dataUrl
-            })
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to save edited image');
-        }
-
-        const result = await response.json();
-        
-        if (result.status === 'success') {
-            console.log('Image updated successfully:', result.data);
-            return result.data;
-        } else {
-            throw new Error(result.message || 'Failed to update image');
-        }
-    } catch (error) {
-        console.error('Error saving edited image:', error);
-        throw error;
-    }
-};
-
 module.exports = {
   generateImage,
   checkImageStatus,
@@ -534,6 +507,5 @@ module.exports = {
   getImageById,
   getImagesByScriptId,
   getImagesBySplitScriptId,
-  checkJobStatus,
-  saveEditedImage
+  checkJobStatus
 };
