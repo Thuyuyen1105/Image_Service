@@ -1,6 +1,8 @@
 const { Worker } = require('worker_threads');
 const path = require('path');
 const os = require('os');
+const { connectDB } = require('./database');
+const Job = require('./models/Job');
 
 const MAX_WORKERS = 5;
 
@@ -12,10 +14,11 @@ class WorkerPool {
         this.activeWorkers = new Set();
     }
 
-    initialize() {
+    async initialize() {
+        await connectDB();
         for (let i = 0; i < this.size; i++) {
             const worker = new Worker(path.join(__dirname, 'worker.js'), {
-                env: process.env // Pass environment variables to worker
+                env: process.env
             });
             
             // Handle worker errors
@@ -38,30 +41,81 @@ class WorkerPool {
     }
 
     async processJob(jobData) {
-        return new Promise((resolve, reject) => {
-            const worker = this.getAvailableWorker();
-            if (!worker) {
-                console.log('No available worker, adding to queue');
-                this.queue.push({ jobData, resolve, reject });
-                return;
+        try {
+            // Validate required fields
+            const { jobId, userId, prompt, scriptId, splitScriptId } = jobData;
+            if (!jobId || !userId || !prompt || !scriptId || !splitScriptId) {
+                throw new Error('Missing required fields: jobId, userId, prompt, scriptId, splitScriptId');
             }
 
-            this.activeWorkers.add(worker);
+            // Check if job already exists
+            let job = await Job.findOne({ jobId });
             
-            worker.once('message', (result) => {
-                this.activeWorkers.delete(worker);
-                resolve(result);
-                this.processNextJob();
-            });
+            // If job doesn't exist, create new one
+            if (!job) {
+                job = new Job({
+                    jobId,
+                    scriptId,
+                    userId,
+                    totalImages: jobData.metadata?.totalImage || 1,
+                    completedImages: 0,
+                    status: 'processing',
+                    imageIds: []
+                });
+                await job.save();
+                console.log('Created new job:', { jobId, status: job.status });
+            } else {
+                console.log('Found existing job:', { 
+                    jobId, 
+                    status: job.status,
+                    completedImages: job.completedImages,
+                    totalImages: job.totalImages
+                });
+            }
 
-            worker.once('error', (error) => {
-                this.activeWorkers.delete(worker);
-                reject(error);
-                this.processNextJob();
-            });
+            // If job is already completed or failed, don't process
+            if (job.status === 'completed' || job.status === 'failed') {
+                return {
+                    status: job.status,
+                    data: {
+                        jobId: job.jobId,
+                        status: job.status,
+                        completedImages: job.completedImages,
+                        totalImages: job.totalImages,
+                        images: job.imageIds || []
+                    }
+                };
+            }
 
-            worker.postMessage(jobData);
-        });
+            // Process job through worker
+            return new Promise((resolve, reject) => {
+                const worker = this.getAvailableWorker();
+                if (!worker) {
+                    console.log('No available worker, adding to queue');
+                    this.queue.push({ jobData, resolve, reject });
+                    return;
+                }
+
+                this.activeWorkers.add(worker);
+                
+                worker.once('message', (result) => {
+                    this.activeWorkers.delete(worker);
+                    resolve(result);
+                    this.processNextJob();
+                });
+
+                worker.once('error', (error) => {
+                    this.activeWorkers.delete(worker);
+                    reject(error);
+                    this.processNextJob();
+                });
+
+                worker.postMessage(jobData);
+            });
+        } catch (error) {
+            console.error('Error in processJob:', error);
+            throw error;
+        }
     }
 
     getAvailableWorker() {
@@ -81,7 +135,6 @@ class WorkerPool {
             this.workers.splice(index, 1);
             this.activeWorkers.delete(worker);
             
-            // Create new worker to replace the failed one
             const newWorker = new Worker(path.join(__dirname, 'worker.js'), {
                 env: process.env
             });
@@ -95,7 +148,6 @@ class WorkerPool {
             this.workers.splice(index, 1);
             this.activeWorkers.delete(worker);
             
-            // Create new worker to replace the exited one
             const newWorker = new Worker(path.join(__dirname, 'worker.js'), {
                 env: process.env
             });

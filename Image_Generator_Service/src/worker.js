@@ -16,31 +16,16 @@ async function generateImage(jobData) {
             scriptId,
             splitScriptId,
             style = 'realistic',
-            resolution = '1024x1024',
-            metadata = {}
+            resolution = '1024x1024'
         } = jobData;
 
-        // Validate tất cả các trường cần thiết cho job
-        if (!jobId || !userId || !prompt || !scriptId || !splitScriptId) {
-            throw new Error('Missing required fields: jobId, userId, prompt, scriptId, splitScriptId');
-        }
-
-        // Tìm hoặc tạo job mới
-        let job = await Job.findOne({ jobId });
+        // Find existing job
+        const job = await Job.findOne({ jobId });
         if (!job) {
-            job = new Job({
-                jobId,
-                scriptId,
-                userId,
-                totalImages: metadata.totalImage || 1,
-                completedImages: 0,
-                status: 'processing',
-                imageIds: []
-            });
-            await job.save();
+            throw new Error('Job not found');
         }
 
-        // Chỉ gửi các trường cần thiết cho imageService
+        // Generate image
         const result = await imageService.generateImage({
             prompt,
             style,
@@ -56,23 +41,22 @@ async function generateImage(jobData) {
             url: result.data.url
         });
 
-        // Chỉ cộng completedImages khi tạo ảnh thành công
+        // Update job only if image was generated successfully
         if (result.status === 'generated') {
-            console.log('Updating job completedImages:', {
-                jobId,
-                beforeCompleted: job.completedImages,
-                afterCompleted: job.completedImages + 1,
-                totalImages: job.totalImages
-            });
+            const updatedJob = await Job.findOneAndUpdate(
+                { jobId },
+                {
+                    $inc: { completedImages: 1 },
+                    $push: { imageIds: result.data.imageId },
+                    $set: { updatedAt: new Date() }
+                },
+                { new: true }
+            );
 
-            await Job.updateOne({ jobId }, {
-                $inc: { completedImages: 1 },
-                $push: { imageIds: result.data.imageId },
-                $set: { updatedAt: new Date() }
-            });
+            if (!updatedJob) {
+                throw new Error('Failed to update job after image generation');
+            }
 
-            // Kiểm tra và cập nhật status
-            const updatedJob = await Job.findOne({ jobId });
             console.log('Job status check:', {
                 jobId,
                 completedImages: updatedJob.completedImages,
@@ -80,39 +64,31 @@ async function generateImage(jobData) {
                 currentStatus: updatedJob.status
             });
 
+            // Check if job is completed
             if (updatedJob.completedImages >= updatedJob.totalImages) {
-                console.log('Updating job status to completed:', {
-                    jobId,
-                    completedImages: updatedJob.completedImages,
-                    totalImages: updatedJob.totalImages
-                });
-                await Job.updateOne(
+                const completedJob = await Job.findOneAndUpdate(
                     { jobId },
-                    { $set: { status: 'completed' } }
+                    { $set: { status: 'completed' } },
+                    { new: true }
                 );
-                
-                // Emit socket event for job completion
-                parentPort.postMessage({
-                    type: 'jobCompleted',
-                    data: {
-                        jobId,
-                        userId,
-                        status: 'completed',
-                        completedImages: updatedJob.completedImages,
-                        totalImages: updatedJob.totalImages,
-                        images: updatedJob.imageIds
-                    }
-                });
+
+                if (completedJob) {
+                    parentPort.postMessage({
+                        type: 'jobCompleted',
+                        data: {
+                            jobId,
+                            userId,
+                            status: 'completed',
+                            completedImages: completedJob.completedImages,
+                            totalImages: completedJob.totalImages,
+                            images: completedJob.imageIds || []
+                        }
+                    });
+                }
             }
-        } else {
-            console.log('Not updating completedImages - image not generated:', {
-                jobId,
-                imageStatus: result.status,
-                currentCompleted: job.completedImages
-            });
         }
 
-        // Gửi kết quả về main thread
+        // Send result back to main thread
         parentPort.postMessage({
             type: 'imageGenerated',
             success: true,
@@ -129,17 +105,23 @@ async function generateImage(jobData) {
     } catch (error) {
         console.error('Error in worker:', error);
         
-        // Cập nhật trạng thái job nếu có lỗi
         try {
+            // Update job status on error
             const job = await Job.findOne({ jobId: jobData.jobId });
             if (job) {
-                // Chỉ set status failed nếu chưa có ảnh nào được tạo thành công
-                if (job.imageIds.length === 0) {
-                    job.status = 'failed';
-                    job.error = error.message;
-                    await job.save();
+                const imageIds = job.imageIds || [];
+                if (imageIds.length === 0) {
+                    await Job.findOneAndUpdate(
+                        { jobId: jobData.jobId },
+                        {
+                            $set: {
+                                status: 'failed',
+                                error: error.message,
+                                updatedAt: new Date()
+                            }
+                        }
+                    );
                     
-                    // Emit socket event for job failure
                     parentPort.postMessage({
                         type: 'jobFailed',
                         data: {
@@ -165,7 +147,7 @@ async function generateImage(jobData) {
     }
 }
 
-// Lắng nghe message từ main thread
+// Listen for messages from main thread
 parentPort.on('message', (jobData) => {
     generateImage(jobData);
 });
